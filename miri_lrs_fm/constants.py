@@ -19,6 +19,9 @@ slit_closed_poly_points = ap_full.tel_to_sci(*ap_slit.closed_polygon_points('tel
 slit_width = (ap_slit.XIdlVert4+ap_slit.XIdlVert3)/2 - (ap_slit.XIdlVert1+ap_slit.XIdlVert2)/2
 slit_height = (ap_slit.YIdlVert2+ap_slit.YIdlVert3)/2 - (ap_slit.YIdlVert4+ap_slit.YIdlVert1)/2
 
+# Where do the spectral traces end up in the two dithers? X coords in pixels
+trace_center_dith1 = 316
+trace_center_dith2 = 333
 
 
 

@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 
 import jwst
 
+from . import constants
+
 def get_crop_region_indices(model):
     """Find the subregion in an LRS cal image that has valid pixels
 
@@ -29,11 +31,20 @@ def get_crop_region_indices(model):
     return ymin, ymax, xmin, xmax
 
 
-def find_and_replace_outlier_pixels(model, nsigma = 7, plot=True, save_path=".", save=True):
+def get_obsid_for_filenames(model):
+    return f'jw{model.meta.observation.program_number}obs{model.meta.observation.observation_number}exp{model.meta.observation.exposure_number}'
+
+
+def find_and_replace_outlier_pixels(model, nsigma = 7, median_size = 7, plot=True, save_path=".", save=True):
     """identify and mask outlier pixels that escaped flagging by the pipeline
 
     Method: high pass filter via unsharp masking, i.e. subtracting a smoothed version of the image
     then identify pixels which are statistical outliers at high significance.
+
+    The median filtering is applied only along the Y axis, to better preserve structure in X, and not
+    mess with the mostly-vertical spectral traces.
+
+    The area with the main spectral trace is ignored, to avoid accidentally "cleaning" any real spectral features
 
     """
 
@@ -44,13 +55,18 @@ def find_and_replace_outlier_pixels(model, nsigma = 7, plot=True, save_path=".",
     sci_cropped_err = model.err[crop_indices[0]:crop_indices[1], crop_indices[2]:crop_indices[3]]
 
 
-
-
-    cropped_smoothed = scipy.ndimage.median_filter(sci_cropped, size=(7,1))
+    cropped_smoothed = scipy.ndimage.median_filter(sci_cropped, size=(median_size,1))
 
     unsharp_masked = sci_cropped-cropped_smoothed
 
     outliers = (np.abs(unsharp_masked) > sci_cropped_err*7 )
+
+    # Let's not mask or replace any pixels right on the main spectral trace
+    dither = int(model.meta.observation.exposure_number)
+    trace_center = constants.trace_center_dith1  if dither==1 else constants.trace_center_dith2
+    trace_width=4
+
+    outliers[:, trace_center - crop_indices[2]-trace_width : trace_center - crop_indices[2]+trace_width] = False
 
 
     # make a copy of the data, and flag DO_NOT_USE for the outlier pixels
@@ -111,8 +127,10 @@ def find_scale_and_offset(model, data, data_err):
         chisq = ((data - scaled)**2/err**2).sum()
         return chisq
 
+    initial_guess = [data.sum()/model.sum(),0]
+
     args = (model, data, data_err) 
-    res = least_squares(objfun_scale_offset, [1,0], args=args, x_scale='jac', diff_step=1.e-1)
+    res = least_squares(objfun_scale_offset, initial_guess, args=args, x_scale='jac', diff_step=1.e-1)
 
     scalefactor, offset = res.x
     return scalefactor, offset

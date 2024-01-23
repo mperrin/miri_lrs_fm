@@ -46,6 +46,7 @@ def estimate_background_spectrum(model, miri, plot=True, bothsides=True):
         axes[1].legend(fontsize=10)
         axes[0].set_ylabel("Y pixel")
         axes[1].set_xlabel(f'Background estimate [{model.meta.bunit_data}]');
+        axes[1].set_ylim(0,400)
         return bg_1d_filt, axes
 
     return bg_1d_filt
