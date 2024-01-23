@@ -26,7 +26,8 @@ from . import utils
 
 
 __all__ = ['sim_offaxis_star', 'plot_taconfirm_psf_comparison', 'setup_sim_to_match_file', 'get_slit_model', 'measure_dither_offset',
-           'generate_lrs_psf_cube', 'generate_dispersed_lrs_model', 'image_registration_dispersed_model', 'scale_and_subtract_dispersed_model']
+           'generate_lrs_psf_cube', 'generate_dispersed_lrs_model', 'image_registration_dispersed_model', 'scale_and_subtract_dispersed_model',
+           'display_dither_comparisons']
 
 def sim_offaxis_star(model, miri, star_coords, wcs_offset=(0,0), npix=80, verbose=False,
                      tweak_offset=None,
