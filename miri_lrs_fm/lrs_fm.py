@@ -5,6 +5,8 @@ import functools
 import numpy as np
 import scipy
 import scipy.interpolate, scipy.ndimage
+
+import asdf
 import matplotlib, matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
@@ -25,45 +27,66 @@ from . import constants
 from . import utils
 
 
-__all__ = ['sim_offaxis_star', 'plot_taconfirm_psf_comparison', 'setup_sim_to_match_file', 'get_slit_model', 'measure_dither_offset',
+__all__ = ['sim_offset_source', 'plot_taconfirm_psf_comparison', 'setup_sim_to_match_file', 'get_slit_model', 'measure_dither_offset',
            'generate_lrs_psf_cube', 'generate_dispersed_lrs_model', 'image_registration_dispersed_model', 'scale_and_subtract_dispersed_model',
            'display_dither_comparisons']
 
-def sim_offaxis_star(model, miri, star_coords, wcs_offset=(0,0), npix=80, verbose=False,
+def sim_offset_source(model, miri, star_coords, wcs_offset=(0,0), npix=80, verbose=False,
                      tweak_offset=None,
                      cube_waves=None,
+                     add_distortion=False,
+                     slit_center_offset=(0,0),
                      **kwargs):
-    """Simulate an off-axis star seen through the LRS slit
+    """Simulate an off-axis star seen through the LRS slit.
+
+    Parameters:
+    -----------
+
+    slit_center_offset : floats
+        (X,Y) coords for location of slit center relative to the center of the simulated array, in pixels
+
+    Assumptions re coordinates and precision:
+         - assumes slit center is precisely at center of array (this is not actually true; fix this!)
+         - i
+
     """
 
     def vprint(*args):
         if verbose:
             print(*args)
 
-    vprint(f"Host star coordinates: {star_coords.to_string('hmsdms')}")
+    # apply any offsets (converted from pixels into arcsec) for where the slit should end up in the image
+    miri.options['lrs_slit_offset_x'] = slit_center_offset[0] * miri.pixelscale
+    miri.options['lrs_slit_offset_y'] = slit_center_offset[1] * miri.pixelscale
+
+    vprint(f"Source coordinates: {star_coords.to_string('hmsdms')}")
     star_coords_pix = np.asarray(model.meta.wcs.world_to_pixel(star_coords))
 
     star_coords_pix -= np.asarray(wcs_offset)
-    vprint(f" Using WCS offset = {wcs_offset}; got star_coords_pix = {star_coords_pix}")
+    vprint(f"    Using WCS offset = {wcs_offset}; got coords_pix = {star_coords_pix}")
     if tweak_offset is not None:
         star_coords_pix -= np.asarray(tweak_offset)
-        vprint(f" Using extra offset tweak = {tweak_offset}; got star_coords_pix = {star_coords_pix}")
+        vprint(f"    Using extra offset tweak = {tweak_offset}; got coords_pix = {star_coords_pix}")
+    # Compute offsets in pixels for the star relative to the center of the slit
     delta_x = star_coords_pix[0] - constants.slit_center[0]
     delta_y = star_coords_pix[1] - constants.slit_center[1]
 
-    miri.options['source_offset_x'] = delta_x * miri.pixelscale
-    miri.options['source_offset_y'] = delta_y * miri.pixelscale
-    vprint(f"Setup off-axis star at {miri.options['source_offset_x']}, {miri.options['source_offset_y']} arcsec relative to slit center")
+    # set source offsets, first applying any offset of the slit
+    miri.options['source_offset_x'] = (delta_x + slit_center_offset[0]) * miri.pixelscale
+    miri.options['source_offset_y'] = (delta_y + slit_center_offset[1]) * miri.pixelscale
+    #vprint(f"DEBUG:\t", star_coords_pix, constants.slit_center, (delta_x, delta_y), slit_center_offset, miri.pixelscale)
+    #vprint(f"Setup off-axis source at {delta_x * miri.pixelscale}, {delta_y * miri.pixelscale} arcsec relative to slit center")
+    vprint(f"Setup off-axis source at {miri.options['source_offset_x']}, {miri.options['source_offset_y']} arcsec relative to array center")
 
     # TODO: Add wavelength-dependent MIRI cruciform model...
 
     if cube_waves is not None:
         vprint("data cube mode")
         psf_star_cube = miri.calc_datacube(cube_waves, progressbar=True,
-                                           fov_pixels=npix, add_distortion=False, **kwargs)
+                                           fov_pixels=npix, add_distortion=add_distortion, **kwargs)
         return psf_star_cube
     else:
-        psf_star = miri.calc_psf(fov_pixels=npix, add_distortion=False, **kwargs)
+        psf_star = miri.calc_psf(fov_pixels=npix, add_distortion=add_distortion, **kwargs)
         vprint("PSF calculation complete")
         return psf_star
 
@@ -83,8 +106,9 @@ def plot_taconfirm_psf_comparison(model, miri, star_coords, wcs_offset=(0,0),  t
 
 
     print("Generating PSF sim for off-axis star:")
-    psf_star = sim_offaxis_star(model, miri, star_coords, wcs_offset,
+    psf_star = sim_offset_source(model, miri, star_coords, wcs_offset,
                                 tweak_offset=tweak_offset,
+                                add_distortion=True,  # this requires dev webbpsf to work for LRS
                                 verbose=True)
 
     imcopy = cutout.data.copy()
@@ -106,7 +130,7 @@ def plot_taconfirm_psf_comparison(model, miri, star_coords, wcs_offset=(0,0),  t
 
 
     # Determine off-axis star coordinates in pixels (for use in plotting)
-    # Note, the actual values used in the calculation happen in sim_offaxis_star
+    # Note, the actual values used in the calculation happen in sim_offset_source
     # this duplicates that calculation for plotting & labeling
     pix_coords = np.asarray(model.meta.wcs.world_to_pixel(star_coords))
     pix_coords -= np.asarray(wcs_offset)
@@ -192,13 +216,21 @@ def setup_sim_to_match_file(filename):
     return miri
 
 
-@functools.cache
-def get_slit_model(npix=80, pixelscale=0.10995457, oversample=25):
-    """ Return a simple model of the LRS slit shape, sampled onto detector pixels """
+#@functools.cache
+def get_slit_model(npix=80, pixelscale=0.10995457, oversample=50, slit_center_offset=(0,0)):
+    """ Return a simple model of the LRS slit shape, sampled onto detector pixels
+
+    By default the slit is precisely centered in the output array; use slit_center_offset to adjust if needed.
+    Offsets specified in pixels (dX, dY) measured using the specified pixel scale.
+    """
 
     # TODO update this per filter, using miricoord?? For subtle per-filter offsets
+    #  - WIP: this can now be done using slit_center_offset
 
-    lrs_slit = poppy.RectangularFieldStop(width=constants.slit_width, height=constants.slit_height)
+    lrs_slit = poppy.RectangularFieldStop(width=constants.slit_width, height=constants.slit_height,
+                                          shift_x=slit_center_offset[0]*pixelscale,
+                                          shift_y=slit_center_offset[1]*pixelscale,
+                                          )
 
     sampled_slit = lrs_slit.sample(npix=npix*oversample, grid_size=npix*pixelscale)
     sampled_slit = poppy.utils.krebin(sampled_slit, (npix, npix)) / oversample**2
@@ -256,9 +288,12 @@ def measure_dither_offset(model_dith1, model_dith2, plot=False, saveplot=False):
 
 def generate_lrs_psf_cube(model_taconfirm, model_dispersed, miri,
                           star_coords, wcsoffset,
+                          label='star',
                           tweak_offset=None,
                           nlambda=None,
+                          model_trace_curvature=False,
                           force_recalc=False,
+                          slit_center_offset=(0,0),
                           plot=True):
     """ Make a PSF cube of LRS PSFs over many wavelengths, corresponding to some image.
 
@@ -274,7 +309,7 @@ def generate_lrs_psf_cube(model_taconfirm, model_dispersed, miri,
 
     # Infer the wavelength range and sampling from the FITS WCS
     ypos = np.arange(400)
-    wavelen = model_dispersed.wavelength[ypos, int(constants.slit_center[0])]
+    wavelen = np.nanmean(model_dispersed.wavelength[ypos], axis=1)
 
     # Set up interpolators for converting back and forth between coordinates
     y_to_wave = scipy.interpolate.interp1d(ypos, wavelen)
@@ -289,8 +324,8 @@ def generate_lrs_psf_cube(model_taconfirm, model_dispersed, miri,
 
 
     # Set up sampled wavelengths for simulation
-    ymin=20
-    ymax=385
+    ymin=8 # minimum valid value in the cal images; masked to nan below this. ~14 microns.
+    ymax=385  #  ~ 4.5 microns
     if nlambda is None:
         nlambda = ymax-ymin+1
     # TODO this hard-coded range is semi-arbitrary, though 385 is around the blue wave cutoff
@@ -311,14 +346,15 @@ def generate_lrs_psf_cube(model_taconfirm, model_dispersed, miri,
 
 
     model=model_dispersed
-    outname = f'psfcube_{utils.get_obsid_for_filenames(model)}_nlam{nlambda}.fits'
+    outname = f'psfcube_{utils.get_obsid_for_filenames(model)}_{label}_nlam{nlambda}.fits'
     if os.path.exists(outname) and not force_recalc:
         print(f'Reloading PSF from {outname}')
         psfs_cube = fits.open(outname)
     else:
         print(f"Generating monochromatic PSFS for {nlambda} wavelengths. This will take a while...")
-        psfs_cube = sim_offaxis_star(model_taconfirm, miri, star_coords, wcsoffset,
+        psfs_cube = sim_offset_source(model_taconfirm, miri, star_coords, wcsoffset,
                                      cube_waves=wave_samp*1e-6, tweak_offset=tweak_offset,
+                                     slit_center_offset=slit_center_offset,
                                      verbose=True)
         psfs_cube.writeto(outname, overwrite=True)
         print(f"Saved PSF to {outname} for reuse.")
@@ -328,7 +364,10 @@ def generate_lrs_psf_cube(model_taconfirm, model_dispersed, miri,
 
 
 def generate_dispersed_lrs_model(psfs_cube, miri, wave_samp, converters, powerlaw=2, plot=True,
-                                 cropwidth=22, xshift=1, add_cruciform=False):
+                                 cropwidth=22, xshift=1,
+                                 add_cruciform=False, model_trace_curvature=True,
+                                 smoothing_sigma=0.5,
+                                 vmax=1e-5):
     """Generate a dispersed model of an LRS spectrum, for some target in or near the slit
 
     TODO: Currently this assumes the dispersion is perfectly vertical, Y axis only, but
@@ -339,35 +378,51 @@ def generate_dispersed_lrs_model(psfs_cube, miri, wave_samp, converters, powerla
     ----------
     psfs_cube : datacube of monochromatic PSFs
 
+    smoothing_sigma : float
+        Sigma for a gaussian smoothing, applied after generating the dispersed model. Empirically,
+        a value around 0.5 may produce better matches to observed data. Hypothesis is this is due to
+        charge migration effects within the detector?
+
     """
 
     n = 400
 
     dispersed_model = np.zeros((n,n), float)
+    npix_psf = psfs_cube[1].data.shape[1]
+    padding_width_per_side = (n-npix_psf)/2
+    print(f'Padded PSF from {npix_psf} to {n} pixels per side. Added padding = {padding_width_per_side} per side.')
 
     if add_cruciform:
+        print("Adding cruciform model interpolated between wavelengths")
         # Cruciform amplitude vs wavelength.
         # Values taken from webbpsf.detectors.apply_miri_scattering
 
-        cruciform_ref_waves =     [5.6,     7.7,     10.0,    11.3,    12.8,  15.0]
-        cruciform_ref_amplitude = [0.00445, 0.00285, 0.00065, 0.00009, 0.00014, 0.0]
+        cruciform_ref_waves =     [3.0,        5.6,     7.7,     10.0,    11.3,    12.8,  15.0]
+        cruciform_ref_amplitude = [0.00445, 0.00445, 0.00285, 0.00065, 0.00009, 0.00014, 0.0]
         cruciform_amp_interp = scipy.interpolate.interp1d(cruciform_ref_waves,
                                                           cruciform_ref_amplitude,
                                                           fill_value='extrapolate')
 
+    if model_trace_curvature:
+        print("Applying shifts to model trace curvature")
+        trace_filename = os.path.join(os.path.dirname(__file__), 'miri_lrs_trace_spectral_curvature_model.asdf')
+        with asdf.open(trace_filename) as f:
+            trace_curvature_model = f.tree['model']  # This yields an astropy.modeling.Model for x shift as a function of wavelength
+    debug_cube = np.zeros((len(wave_samp), n, n), float)
 
     for iw, wave in enumerate(tqdm(wave_samp, total=len(wave_samp), ncols=80)):
         p = psfs_cube[1].data[iw]
         # Put the PSF into an oversized padded array
         padded = poppy.utils.pad_or_crop_to_shape(p, (n,n))
 
-        # TODO: add wavelength-dependent cruciform, if that wasn't already done in the PSF generation
+        # add wavelength-dependent cruciform, if that wasn't already done in the PSF generation
 
         if add_cruciform:
             kernel_amp = cruciform_amp_interp(wave)
             #print(wave, kernel_amp)
             kernel_x = webbpsf.detectors._make_miri_scattering_kernel(padded, kernel_amp, 1)
             im_conv_both = webbpsf.detectors._apply_miri_scattering_kernel(padded, kernel_x, 1)
+            # ensure conservation of energy: normalize to keep the sum of the array the same, i.e. same total intensity
             tot_int = padded.sum()
             padded += im_conv_both
             padded *= tot_int/padded.sum()
@@ -385,32 +440,48 @@ def generate_dispersed_lrs_model(psfs_cube, miri, wave_samp, converters, powerla
         #scalefactor = dlambda * 1/wave**powerlaw
         scalefactor = 1/wave**powerlaw
 
-        #print(wave, dy, scalefactor)
+        # Avoid flux wrapping around numerically, which would be nonphysical.
+        # do this by figuring out if a wrap will occur, and if so pre-emptively zeroing the pixels that will get wrapped.
+        if dy > 0:
+            padded[-int(dy):] = 0
+        else:
+            padded[:int(-dy)] = 0
 
-        # Shift the padded array, apply scale factor, add into acculumator
-        dispersed_model += np.roll(np.roll(padded, int(dy), axis=0), xshift, axis=1) *scalefactor
 
+        # Shift the padded array, apply scale factor
+        scaled_shifted_array =  np.roll(np.roll(padded, int(dy), axis=0), xshift, axis=1) *scalefactor
+
+        if model_trace_curvature:
+            xshift_curve = trace_curvature_model(wave)
+            #print('trace curve', wave, xshift_curve)
+            scaled_shifted_array = scipy.ndimage.shift(scaled_shifted_array, (0, xshift_curve))
+        debug_cube[iw] = scaled_shifted_array
+
+        # add into acculumator
+        dispersed_model += scaled_shifted_array
+
+    # Optional debug output
+    #  TODO some version of this could be used to do a per-wavelength full rigorous forward model, including
+    #  spectral crosstalk... Someday!
+    fits.writeto('tmp_dispersed.fits', debug_cube, overwrite=True)
+    print(' ==> tmp_dispersed.fits')
 
     # Add detector IPC (This is pretty negligible for MIRI)
     sigma = webbpsf.constants.INSTRUMENT_DETECTOR_CHARGE_DIFFUSION_DEFAULT_PARAMETERS['MIRI']
     dispersed_model = scipy.ndimage.gaussian_filter(dispersed_model, sigma / miri.pixelscale)
 
-    # Add detector cruciform. This requires shoving the data into a FITS HDUList as expected by webbpsf
-    #hdu = fits.PrimaryHDU(dispersed_model)
-    #hdu['INSTRUME'] = "MIRI"
-    #hdu['FILTER'] = 'F770W'
-    # TODO leave this for later...
+    if smoothing_sigma is not None:
+        print(f'Applying additional smoothing (Gaussian, sigma={sigma}')
+        dispersed_model = scipy.ndimage.gaussian_filter(dispersed_model, smoothing_sigma)
+
 
     if plot:
         plt.figure(figsize=(12,12))
 
         dispersed_model_cropped = dispersed_model[:, n//2-cropwidth:n//2+cropwidth]
-        # print(n//2-cropwidth, n//2+cropwidth)
 
-        vmx = 1e-5 # dispersed_model_cropped.max()
-        #print("Vmax", vmx)
         plt.imshow(dispersed_model_cropped,
-                   norm=matplotlib.colors.AsinhNorm(vmin=0, vmax=vmx,
+                   norm=matplotlib.colors.AsinhNorm(vmin=0, vmax=vmax,
                   linear_width=dispersed_model_cropped.max()/5))
 
         ytickvals = np.linspace(0,400,9).clip(20,385)
@@ -421,11 +492,16 @@ def generate_dispersed_lrs_model(psfs_cube, miri, wave_samp, converters, powerla
 
 
 
-def image_registration_dispersed_model(model_sci, dispersed_model_cropped, bg_1d_filt,
+def image_registration_dispersed_model(model_sci, dispersed_model_cropped, background,
                                       adjust_flux_scale=1, savepath='.',
                                       plot=True, plot_flux_scale_region=False,
+                                      trace_width = 6,
                                       ):
     """ Measure shifts that might improve image registration between the model and the data
+
+    This works by taking an input imagemodel, **cropping to exclude the columns which have the spectral
+    trace of the companion source**, and keeping the other columns which have just the PSF wings, and
+    doing registration based on those.
 
     This may work better on one dither than the other, depending on stellar PSF wings location relative
     to the science target
@@ -446,15 +522,19 @@ def image_registration_dispersed_model(model_sci, dispersed_model_cropped, bg_1d
 
     dither = int(model_sci.meta.observation.exposure_number)
 
-    bg_2d = bg_1d_filt[:, np.newaxis]
+    # Background model can be either a 1D spectrum or a 2D spectral image.
+    if background.ndim == 2:
+        bg_2d = background
+    elif background.ndim == 1:
+        bg_2d = background[:, np.newaxis]
+    else:
+        raise RuntimeError("Background model doesn't have the expected dimensionality")
 
     sci_cropped_bgsub = sci_cropped - bg_2d
 
     # Crop out regions away from the main trace, covering most of the relatively blue wavelength side
-    trace_width = 5
     if dither==1:
         trace_center = 316 - crop_indices[2]
-
         data_psfwings = sci_cropped_bgsub[250:375, trace_center+trace_width:]
         err_psfwings = sci_cropped_err[250:375, trace_center+trace_width:]
 
@@ -481,25 +561,41 @@ def image_registration_dispersed_model(model_sci, dispersed_model_cropped, bg_1d
         norm = matplotlib.colors.AsinhNorm(vmin=-std, vmax=np.nanmax(data_psfwings), linear_width=2*std)
         axes[0].imshow(data_psfwings, norm=norm)
 
-        axes[0].set_title("Data on PSF wings")
+        axes[0].set_title("Data on PSF wings\nBackground subtracted")
 
 
         mask = np.isfinite(data_psfwings) & np.isfinite(err_psfwings)
         scalefactor, offset = utils.find_scale_and_offset(sim_psfwings[mask],
-                                                        data_psfwings[mask],
-                                                        err_psfwings[mask])
+                                                          data_psfwings[mask],
+                                                          err_psfwings[mask])
         print("Scale factor and offset:", scalefactor, offset)
+        if adjust_flux_scale:
+            print(f" OVERRIDE. Adjusting flux scale by {adjust_flux_scale}x")
+            scalefactor *= adjust_flux_scale
+
+        # estimate chi^2
+        chisqr = np.nansum(  (data_psfwings - (sim_psfwings *scalefactor + offset))**2 / err_psfwings**2)
+        ndof = np.isfinite(data_psfwings).sum() - 2
+
+        stack = np.stack( [data_psfwings, sim_psfwings *scalefactor + offset, data_psfwings - (sim_psfwings *scalefactor + offset)])
+        fits.writeto('tmp_registration.fits', stack, overwrite=True)
+        print(' ==> tmp_registration.fits')
 
         axes[1].imshow(sim_psfwings *scalefactor + offset , norm=norm )
         axes[1].set_title("Sim of PSF wings")
 
         axes[2].imshow(data_psfwings - sim_psfwings*scalefactor - offset, norm=norm)
         axes[2].set_title("Subtraction\nwith no registration")
+        axes[2].text(0.5, 0.95, f'$\\chi^2_r = $ {chisqr/ndof:.2f}', color='white', transform=axes[2].transAxes, horizontalalignment='center')
 
 
         shifted_psfwings = scipy.ndimage.shift(sim_psfwings, shift)
+        chisqr = np.nansum(  (data_psfwings - (shifted_psfwings *scalefactor + offset))**2 / err_psfwings**2)
+        ndof = np.isfinite(data_psfwings).sum() - 4   # fewer dofs here because we fit 2 additional parameters
+
         axes[3].imshow(data_psfwings - shifted_psfwings*scalefactor - offset, norm=norm)
         axes[3].set_title(f"Subtraction\nwith registration\n{shift}")
+        axes[3].text(0.5, 0.95, f'$\\chi^2 = $ {chisqr/ndof:.2f}', color='white', transform=axes[3].transAxes, horizontalalignment='center')
 
         for ax in axes:
             ax.xaxis.set_visible(False)
@@ -509,7 +605,7 @@ def image_registration_dispersed_model(model_sci, dispersed_model_cropped, bg_1d
 
 
 
-def scale_and_subtract_dispersed_model( model_sci, dispersed_model_cropped, bg_1d_filt, converters,
+def scale_and_subtract_dispersed_model( model_sci, dispersed_model_cropped, background, converters,
                                       adjust_flux_scale=1, savepath='.',
                                       plot=True, plot_flux_scale_region=False, vmax=20,
                                       ):
@@ -527,7 +623,14 @@ def scale_and_subtract_dispersed_model( model_sci, dispersed_model_cropped, bg_1
 
     print("Dither:", dither)
     # Background subtraction
-    bg_2d = bg_1d_filt[:, np.newaxis]
+    # Background model can be either a 1D spectrum or a 2D spectral image.
+    if background.ndim == 2:
+        bg_2d = background
+    elif background.ndim == 1:
+        bg_2d = background[:, np.newaxis]
+    else:
+        raise RuntimeError("Background model doesn't have the expected dimensionality")
+
 
     sci_cropped_bgsub = sci_cropped - bg_2d
 
@@ -572,9 +675,14 @@ def scale_and_subtract_dispersed_model( model_sci, dispersed_model_cropped, bg_1
     nanmask[np.isnan(sci_cropped_bgsub)] = np.nan
 
     scalefactor *= adjust_flux_scale
-    print("Scalefactor", scalefactor)
+    print("Scalefactor", scalefactor, "BG offset", offset)
 
     combined_model = dispersed_model_cropped*scalefactor + offset  + nanmask  #+  bg_1d_filt[:, np.newaxis]
+
+    # estimate chi^2
+    #chisqr = np.nansum(  (data_psfwings - (sim_psfwings *scalefactor + offset))**2 / err_psfwings**2)
+    #ndof = np.isfinite(data_psfwings).sum() - 2
+
 
     # Save output data
     output = model_sci.copy()
@@ -616,20 +724,20 @@ def scale_and_subtract_dispersed_model( model_sci, dispersed_model_cropped, bg_1
 
         plt.savefig(f'lrs_starsub_{utils.get_obsid_for_filenames(model_sci)}.pdf')
 
-#         # Secondary diagnostic plot
-#         plt.figure()
-#         c_y0 = 220
-#         print(sci_cropped_bgsub[mask_ratio_region].shape)
-#         yv = np.linspace(c_y0, c_y1-1, c_y1-c_y0)
-#         ax=plt.plot(yv, sci_cropped_bgsub[c_y0:c_y1, c_x0:c_x1].sum(axis=1), label='sci cropped - bg', alpha=0.25, ls='--')
-#         plt.plot(yv, combined_model[c_y0:c_y1, c_x0:c_x1].sum(axis=1), label='model', alpha=0.25, ls='--')
-#         plt.ylabel("Sum per row")
-#         ax2 = plt.gca().twinx()
-#         ax2.plot(yv, sci_cropped_bgsub[c_y0:c_y1, c_x0:c_x1].std(axis=1), label='STD(sci cropped -bg)', color='C2')
-#         ax2.plot(yv, (sci_cropped_bgsub-combined_model)[c_y0:c_y1, c_x0:c_x1].std(axis=1), label='STD(residuals)', color='C3')
-#         ax2.legend()
-#         ax2.set_ylim(0,)
-#         plt.legend()
+        # Secondary diagnostic plot
+        plt.figure()
+        c_y0 = 220
+        print(sci_cropped_bgsub[mask_ratio_region].shape)
+        yv = np.linspace(c_y0, c_y1-1, c_y1-c_y0)
+        ax=plt.plot(yv, sci_cropped_bgsub[c_y0:c_y1, c_x0:c_x1].sum(axis=1), label='sci cropped - bg', alpha=0.25, ls='--')
+        plt.plot(yv, combined_model[c_y0:c_y1, c_x0:c_x1].sum(axis=1), label='model', alpha=0.25, ls='--')
+        plt.ylabel("Sum per row")
+        ax2 = plt.gca().twinx()
+        ax2.plot(yv, sci_cropped_bgsub[c_y0:c_y1, c_x0:c_x1].std(axis=1), label='STD(sci cropped -bg)', color='C2')
+        ax2.plot(yv, (sci_cropped_bgsub-combined_model)[c_y0:c_y1, c_x0:c_x1].std(axis=1), label='STD(residuals)', color='C3')
+        ax2.legend()
+        ax2.set_ylim(0,)
+        plt.legend()
 
         # Improved diagnostic plot
         plt.figure()
@@ -661,8 +769,9 @@ def scale_and_subtract_dispersed_model( model_sci, dispersed_model_cropped, bg_1
         ax2.set_ylim(1,)
         plt.legend()
 
-    #stack = np.stack((sci_cropped_bgsub, combined_model, sci_cropped_bgsub-combined_model))
-    #fits.writeto('tmp.fits', stack, overwrite=True)
+    stack = np.stack((sci_cropped_bgsub, combined_model, sci_cropped_bgsub-combined_model))
+    fits.writeto('tmp.fits', stack, overwrite=True)
+    print(" debug output => tmp.fits")
 
     return output
 
@@ -673,7 +782,7 @@ def display_dither_comparisons(model_sci_dith1, model_sci_dith2,
 
 
 
-    crop_indices = utils.get_crop_region_indices(model_sci)
+    crop_indices = utils.get_crop_region_indices(model_sci_dith1)
 
     # Subtract the input science data
     diff_im = model_sci_dith1.data - model_sci_dith2.data
@@ -705,7 +814,7 @@ def display_dither_comparisons(model_sci_dith1, model_sci_dith2,
     for ax in axes:
         ax.set_yticks(ytickvals, [f'{int(y)}\n{converters["y_to_wave"](y):.02f} $\mu$m' for y in ytickvals])
 
-    fig.suptitle("Dither Subtractions for "+model_sci.meta.target.catalog_name +f" and host star seen in LRS Slit\n{utils.get_obsid_for_filenames(model_sci_dith1)[:-4]}",
+    fig.suptitle("Dither Subtractions for "+model_sci_dith1.meta.target.catalog_name +f" and host star seen in LRS Slit\n{utils.get_obsid_for_filenames(model_sci_dith1)[:-4]}",
                  fontweight='bold', fontsize=14)
 
 
