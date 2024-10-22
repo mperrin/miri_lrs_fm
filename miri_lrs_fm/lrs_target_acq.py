@@ -19,7 +19,6 @@ import webbpsf
 import misc_jwst
 import spaceKLIP
 
-
 from . import constants
 from . import lrs_fm
 from . import utils
@@ -300,9 +299,11 @@ def plot_ta_verification_image(model, wcs_offset=(0, 0), host_star_coords=None, 
     # Separate into integer part (used for extracting a subarray) and subpixel part (for offsetting the slit model)
 
     if constants.USE_WCS_FOR_SLIT_COORDS:
+        print("Inferring LRS slit center based on SIAF and WCS in that image")
         slit_center = model.meta.wcs.transform('v2v3', 'detector', constants.ap_slit.V2Ref,constants.ap_slit.V3Ref )
         slit_closed_poly_points = model.meta.wcs.transform('v2v3', 'detector', *constants.ap_slit.closed_polygon_points('tel', rederive=False))
     else:
+        print("Using LRS slit center from constants file")
         slit_center = constants.slit_center
         slit_closed_poly_points = constants.slit_closed_poly_points
 
@@ -316,13 +317,13 @@ def plot_ta_verification_image(model, wcs_offset=(0, 0), host_star_coords=None, 
     target_coords = astropy.coordinates.SkyCoord(model.meta.target.ra, model.meta.target.dec,
                                                  frame='icrs', unit=u.deg)
     target_coords_pix = np.asarray(model.meta.wcs.world_to_pixel(target_coords))
-    print(f"Target coords from WCS: {target_coords_pix}")
-    print(f"Using WCS offset from TA image: {wcs_offset}")
+    print(f"Target coords from WCS: {target_coords_pix} pix")
+    print(f"Using WCS offset from TA image: {wcs_offset} pix")
     target_coords_pix -= np.asarray(wcs_offset)
     if tweak_offset is not None:
-        print(f"Using additional tweak offset: {tweak_offset}")
+        print(f"Using additional tweak offset: {tweak_offset} pix")
         target_coords_pix -= np.asarray(tweak_offset)
-    print(f"Target coords adjusted: {target_coords_pix}")
+    print(f"Target coords adjusted: {target_coords_pix} pix")
 
 
     tfit_result, tfit_cov = simple_position_fit(model, target_coords_pix,
@@ -527,6 +528,7 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
                                 tweak_offset=None,
                                 companion_tweak_offset=None,
                                 adjust_slit_center_offset=None,
+                                convolve_slit=True,
                                 plot=True, verbose=True,
                                 box_size=80, vmax=20, saveplot=True, **kwargs):
     """ Generate and plot simulation of the PSF scene entering the LRS slit in a TACONFIRM image.
@@ -620,6 +622,13 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
                                     slit_center_offset=slit_center_subpix_offset,
                                     verbose=verbose, **kwargs)
 
+    print("Generating PSF sim for slit model convolution:")
+    # no offsets, nothing special, just an on-axis PSF. Make sure to use odd sampling so it's centered
+    miri.options['source_offset_x'] = 0.0
+    miri.options['source_offset_y'] = 0.0
+    psf_for_slit = miri.calc_psf(fov_pixels=31)
+    psf_kernel_for_slit = psf_for_slit[3].data / psf_for_slit[3].data.sum() # normalized convolution kernel
+
 
     imcopy = cutout.data.copy()
 
@@ -632,15 +641,25 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
 
     # use left and right parts of slit to estimate flux ratio
     sampled_slit = lrs_fm.get_slit_model(npix=box_size, pixelscale=miri.pixelscale, slit_center_offset=slit_center_subpix_offset)
+    sampled_slit = astropy.convolution.convolve_fft(sampled_slit, psf_kernel_for_slit)
+
     y, x = np.indices((box_size, box_size))
 
     # Where and how much to mask out around the companion, for scaling the stellar PSF wings or conversely the companion PSF?
     trace_cen = 30.5
     trace_width = 4
 
-    mask_slit = (sampled_slit>0.1) & np.isfinite(cutout.data) & np.isfinite(cutout_err.data)
+    slit_region_thresh = 0.05
+    mask_slit = scipy.ndimage.binary_dilation(sampled_slit > slit_region_thresh, iterations=3) & np.isfinite(cutout.data) & np.isfinite(cutout_err.data)
+
     mask_for_offset_star = mask_slit & ((x< trace_cen-trace_width ) | (x >trace_cen+trace_width))  # mask to get pixels IN the slit, but EXCLUDING the target at its first dither pos
     mask_for_target = mask_slit & ((x> trace_cen-trace_width ) | (x <trace_cen+trace_width))  # mask to get pixels IN the slit, and ONLY INLCUDING the target at its first dither pos
+
+    mask_outside_slit =  (~mask_slit) & np.isfinite(cutout.data) & np.isfinite(cutout_err.data)
+    bgmn, bgmd, bgsig = astropy.stats.sigma_clipped_stats(cutout.data[mask_outside_slit])
+
+    #plt.figure()
+    #plt.imshow(mask_slit)
 
     if offset_star_coords:
         # Find the scale factor and offset that best fit that PSF to the data, via a simple least-squares fit
@@ -664,7 +683,7 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
 
     if offset_star_coords:
         # Now let's do a joint fit of both to optimize simultaneously
-        scalefactor, scalefactor_comp, background_estimate = utils.find_scales_2x_and_offset(psf_star[ext].data[mask_slit],
+        scalefactor, scalefactor_comp, background_estimate, chisqr = utils.find_scales_2x_and_offset(psf_star[ext].data[mask_slit],
                                                                                  psf_target[ext].data[mask_slit],
                                                                                  cutout.data[mask_slit],
                                                                                  cutout_err.data[mask_slit],
@@ -677,11 +696,18 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
         bkgd_psf_model = psf_star[ext].data*scalefactor + sampled_slit*background_estimate
         targetmodel = psf_target[ext].data*scalefactor_comp
     else:
-        scalefactor_comp, background_estimate_comp = utils.find_scale_and_offset(psf_target[ext].data[mask_slit],
-                                                                                 residuals[mask_slit],
-                                                                                 cutout_err.data[mask_slit])
-        bkgd_psf_model = sampled_slit*background_estimate
+        scalefactor_comp, scalefactor_slitmodel, background_estimate, chisqr = utils.find_scales_2x_and_offset(psf_target[ext].data[mask_slit],
+                                                                                 sampled_slit[mask_slit],
+                                                                                 cutout.data[mask_slit],
+                                                                                 cutout_err.data[mask_slit],
+                                                                                 initial_guess=(scalefactor_comp, 1, background_estimate))
+ 
+        #scalefactor_comp, background_estimate_comp = utils.find_scale_and_offset(psf_target[ext].data[mask_slit],
+        #                                                                         residuals[mask_slit],
+        #                                                                         cutout_err.data[mask_slit])
+        bkgd_psf_model = sampled_slit*scalefactor_slitmodel + background_estimate
         targetmodel = psf_target[ext].data*scalefactor_comp  #+ sampled_slit*background_estimate
+    #bkgd_psf_model[mask_outside_slit] += background_estimate #bgmd + np.random.normal(scale=bgsig, size=mask_outside_slit.sum())
     print(f"Flux scale factor for target: {scalefactor_comp}")
     scaled_targetmodel = targetmodel * u.Unit(model.meta.bunit_data) * (model.meta.photometry.pixelarea_steradians*u.sr)  # convert to MJy
 
@@ -716,7 +742,7 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
         # Determine off-axis star coordinates in pixels (for use in plotting)
         # Note, the actual values used in the calculation happen in sim_offset_source
         # this duplicates that calculation for plotting & labeling
-        pix_coords = np.asarray(model.meta.wcs.world_to_pixel(star_coords))
+        pix_coords = np.asarray(model.meta.wcs.world_to_pixel(offset_star_coords))
         pix_coords -= np.asarray(wcs_offset)
         if tweak_offset is not None:
             pix_coords -= np.asarray(tweak_offset)
@@ -806,8 +832,9 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
 
 
         ######### Second, cleaner plot for paper:
-        fig, axes = plt.subplots(figsize=(12,2.25), ncols=4, gridspec_kw={'width_ratios':[1,1,1,0.1], 'wspace':0.1,
+        fig, axes = plt.subplots(figsize=(12,2.5), ncols=4, gridspec_kw={'width_ratios':[1,1,1,0.1], 'wspace':0.1,
                                                                       'top':0.8, 'bottom': 0.1, 'left':0.01, 'right':0.92})
+        fig.suptitle(f"TA confirm forward model for jw{model.meta.observation.program_number} obs {int(model.meta.observation.observation_number):03d}")
         # Plot observed data
         axes[0].imshow(imcopy, norm=norm, cmap=cmap, extent=extent, interpolation='none')
         axes[0].set_title("TA Confirmation Image", fontsize=12) #\nfor "+ model.meta.target.catalog_name)
@@ -858,6 +885,8 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
         #axes[0].set_title("Observed Data")
         axes[0].text(0.03, 0.95, model.meta.target.catalog_name, color='white', verticalalignment='top',
                      transform=axes[0].transAxes)
+        axes[0].text(0.03, 0.05, model.meta.instrument.filter, color='white', verticalalignment='bottom',
+                     transform=axes[0].transAxes)
         labelaxis(axes[0], 'Observed data', )
 
         plt.tight_layout()
@@ -868,7 +897,7 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
 
         axes[2].imshow(bkgd_psf_model, extent=extent,
                        norm=norm, cmap=cmap)
-        labelaxis(axes[2], 'Model: Background', )
+        labelaxis(axes[2], 'Model: Host Star + Bkgd.' if offset_star_coords else 'Model: Background', )
 
 
 
@@ -878,9 +907,13 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
 
 
         axes[4].imshow(residuals, norm=norm, cmap=cmap, extent=extent)
+        axes[4].contour(mask_slit, lw=1, colors='white', alpha=0.5, extent=extent)
         labelaxis(axes[4], 'Residuals', )
         axes[4].text(0.03, 0.95, f"$\\chi^2_r$ = {chisqr/ndof:.3f}", color='white', verticalalignment='top',
                      transform=axes[4].transAxes)
+        axes[4].text(0.03, 0.05, f"contour shows fitting region", color='white', verticalalignment='bottom',
+                     transform=axes[4].transAxes)
+
 
         for ax in axes[0:5]:
             ax.xaxis.set_visible(False)
@@ -895,7 +928,7 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
         fig.tight_layout()
 
         if saveplot:
-            outname = f'plots_miri/lrs_taconfirm_forward_model_jw{model.meta.observation.program_number}obs{model.meta.observation.observation_number}_5panel.png'
+            outname = f'lrs_taconfirm_forward_model_jw{model.meta.observation.program_number}obs{model.meta.observation.observation_number}_5panel.png'
             plt.savefig(outname)
             plt.savefig(outname.replace('png', 'pdf'))
             print(f" => Saved to {outname} and .pdf")
@@ -952,3 +985,28 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
             fig.tight_layout()
 
     return chisqr
+
+
+def optimize_taconfirm_fit_tweak_offset(model_taconf, miri, wcs_offset=(0,0), tweak_offset=(0,0)):
+    """ This optimizes the tweak_offset parameter to get a better fit
+    """
+    from scipy.optimize import least_squares
+
+    def objfun_fit_tweak_offset(params):
+        tweak_offset = np.asarray([params[0], params[1]])
+        #change which of the next 4 lines are commented in/out to switch b/c
+        chisqr = plot_taconfirm_psf_fit_flux(model_taconf, miri,
+                                             wcs_offset=wcs_offset,
+                                             tweak_offset=tweak_offset,
+                                             #companion_tweak_offset=(0,0),  
+                                             plot=False, verbose=False,
+                                             nlambda=3
+                               )
+        print(f' ==== offset = ', params, 'chisqr = ', chisqr)
+    
+        return chisqr
+
+    initial_guess = tweak_offset
+    res = least_squares(objfun_fit_tweak_offset, initial_guess,  x_scale='jac') #, diff_step=1.e-1)
+    print(f"Optimized offset: {res.x}")
+    return res

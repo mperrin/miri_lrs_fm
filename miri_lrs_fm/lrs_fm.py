@@ -63,7 +63,7 @@ def sim_offset_source(model, miri, star_coords, wcs_offset=(0,0), npix=80, verbo
     star_coords_pix = np.asarray(model.meta.wcs.world_to_pixel(star_coords))
 
     star_coords_pix -= np.asarray(wcs_offset)
-    vprint(f"    Using WCS offset = {wcs_offset}; got coords_pix = {star_coords_pix}")
+    vprint(f"    Using WCS offset = {wcs_offset} pix; got coords_pix = {star_coords_pix}")
     if tweak_offset is not None:
         star_coords_pix -= np.asarray(tweak_offset)
         vprint(f"    Using extra offset tweak = {tweak_offset}; got coords_pix = {star_coords_pix}")
@@ -267,7 +267,7 @@ def measure_dither_offset(model_dith1, model_dith2, plot=False, saveplot=False):
 
         axes[0].set_title("Dither 1")
         axes[1].set_title("Dither 2")
-        fig.text(0.7, 0.82, f"Dither offset:\n(inferred from WCS)\n\n\n$\Delta$x, $\Delta$y = {dither_offset[0]:.3f}, {dither_offset[1]:.3f} pix")
+        fig.text(0.7, 0.82, f"Dither offset:\n(inferred from WCS)\n\n\n$\\Delta$x, $\\Delta$y = {dither_offset[0]:.3f}, {dither_offset[1]:.3f} pix")
 
         for ax in axes:
             ax.set_xlim(300,350)
@@ -363,10 +363,11 @@ def generate_lrs_psf_cube(model_taconfirm, model_dispersed, miri,
 
 
 
-def generate_dispersed_lrs_model(psfs_cube, miri, wave_samp, converters, powerlaw=2, plot=True,
+def generate_dispersed_lrs_model(psfs_cube, miri, wave_samp, converters, model_sci=None, powerlaw=2, plot=True,
                                  cropwidth=22, xshift=1,
                                  add_cruciform=False, model_trace_curvature=True,
                                  smoothing_sigma=0.5,
+                                 label='dispersed',
                                  vmax=1e-5):
     """Generate a dispersed model of an LRS spectrum, for some target in or near the slit
 
@@ -385,6 +386,7 @@ def generate_dispersed_lrs_model(psfs_cube, miri, wave_samp, converters, powerla
 
     """
 
+    # TODO revise calc to work oversampled then bin down after dispersing
     n = 400
 
     dispersed_model = np.zeros((n,n), float)
@@ -465,6 +467,14 @@ def generate_dispersed_lrs_model(psfs_cube, miri, wave_samp, converters, powerla
     #  spectral crosstalk... Someday!
     fits.writeto('tmp_dispersed.fits', debug_cube, overwrite=True)
     print(' ==> tmp_dispersed.fits')
+    if model_sci is not None:
+        outname = f'psf_dispersed_{utils.get_obsid_for_filenames(model_sci)}_{label}_nlam{nlambda}.fits'
+    else:
+        outname = f'psf_dispersed_model_{label}_nlam{nlambda}.fits'
+    fits.writeto(outname, dispersed_model, overwrite=True)
+    print(f' ==> {outname}')
+
+ 
 
     # Add detector IPC (This is pretty negligible for MIRI)
     sigma = webbpsf.constants.INSTRUMENT_DETECTOR_CHARGE_DIFFUSION_DEFAULT_PARAMETERS['MIRI']
@@ -485,7 +495,7 @@ def generate_dispersed_lrs_model(psfs_cube, miri, wave_samp, converters, powerla
                   linear_width=dispersed_model_cropped.max()/5))
 
         ytickvals = np.linspace(0,400,9).clip(20,385)
-        plt.yticks(ytickvals, [f'{int(y)}\n{converters["y_to_wave"](y):.02f} $\mu$m' for y in ytickvals])
+        plt.yticks(ytickvals, [f'{int(y)}\n{converters["y_to_wave"](y):.02f} $\\mu$m' for y in ytickvals])
 
 
     return dispersed_model_cropped
@@ -704,7 +714,7 @@ def scale_and_subtract_dispersed_model( model_sci, dispersed_model_cropped, back
         axes[2].set_title("Data - scaled model", fontsize='small')
 
         ytickvals = np.linspace(0,400,9).clip(20,385)
-        axes[0].set_yticks(ytickvals, [f'{int(y)}\n({converters["y_to_wave"](y):.02f} $\mu$m)' for y in ytickvals])
+        axes[0].set_yticks(ytickvals, [f'{int(y)}\n({converters["y_to_wave"](y):.02f} $\\mu$m)' for y in ytickvals])
 
         for ax in axes:
             #ax.legend(loc='upper right')
@@ -812,7 +822,7 @@ def display_dither_comparisons(model_sci_dith1, model_sci_dith2,
 
     ytickvals = np.linspace(0,400,9).clip(20,385)
     for ax in axes:
-        ax.set_yticks(ytickvals, [f'{int(y)}\n{converters["y_to_wave"](y):.02f} $\mu$m' for y in ytickvals])
+        ax.set_yticks(ytickvals, [f'{int(y)}\n{converters["y_to_wave"](y):.02f} $\\mu$m' for y in ytickvals])
 
     fig.suptitle("Dither Subtractions for "+model_sci_dith1.meta.target.catalog_name +f" and host star seen in LRS Slit\n{utils.get_obsid_for_filenames(model_sci_dith1)[:-4]}",
                  fontweight='bold', fontsize=14)
