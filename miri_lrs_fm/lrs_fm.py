@@ -32,11 +32,12 @@ __all__ = ['sim_offset_source', 'plot_taconfirm_psf_comparison', 'setup_sim_to_m
            'display_dither_comparisons']
 
 def sim_offset_source(model, miri, star_coords, wcs_offset=(0,0), npix=80, verbose=False,
-                     tweak_offset=None,
-                     cube_waves=None,
-                     add_distortion=False,
-                     slit_center_offset=(0,0),
-                     **kwargs):
+                      tweak_offset=None,
+                      cube_waves=None,
+                      add_distortion=False,
+                      slit_center_offset=(0,0),
+                      wcs = None,
+                      **kwargs):
     """Simulate an off-axis star seen through the LRS slit.
 
     Parameters:
@@ -50,6 +51,8 @@ def sim_offset_source(model, miri, star_coords, wcs_offset=(0,0), npix=80, verbo
          - i
 
     """
+    if wcs is None:
+        wcs = model.meta.wcs
 
     def vprint(*args):
         if verbose:
@@ -60,7 +63,7 @@ def sim_offset_source(model, miri, star_coords, wcs_offset=(0,0), npix=80, verbo
     miri.options['lrs_slit_offset_y'] = slit_center_offset[1] * miri.pixelscale
 
     vprint(f"Source coordinates: {star_coords.to_string('hmsdms')}")
-    star_coords_pix = np.asarray(model.meta.wcs.world_to_pixel(star_coords))
+    star_coords_pix = np.asarray(wcs.world_to_pixel(star_coords))
 
     star_coords_pix -= np.asarray(wcs_offset)
     vprint(f"    Using WCS offset = {wcs_offset} pix; got coords_pix = {star_coords_pix}")

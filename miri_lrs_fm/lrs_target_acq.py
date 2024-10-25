@@ -30,7 +30,7 @@ def get_target_coords(model):
                                         frame='icrs', unit=u.deg)
 
 
-def plot_full_image(filename_or_datamodel, ax=None, vmax = 10, colorbar=True, colorbar_orientation='vertical'):
+def plot_full_image(filename_or_datamodel, ax=None, vmax = 10, colorbar=True, colorbar_orientation='vertical', wcs=None):
     """Plot a full-frame LRS image, with annotations"""
 
     if isinstance(filename_or_datamodel, stdatamodels.jwst.datamodels.JwstDataModel):
@@ -56,17 +56,22 @@ def plot_full_image(filename_or_datamodel, ax=None, vmax = 10, colorbar=True, co
 
     annotation_text = f"{model.meta.target.proposer_name}\n{model.meta.instrument.filter}, {model.meta.exposure.readpatt}:{model.meta.exposure.ngroups}:{model.meta.exposure.nints}\n{model.meta.exposure.effective_exposure_time:.2f} s"
 
-    try:
-        wcs = model.meta.wcs
-        # I don't know how to deal with the slightly different API of the GWCS class
-        # so, this is crude, just cast it to a regular WCS and drop the high order distortion stuff
-        # This suffices for our purposes in plotting compass annotations etc.
-        # (There is almost certainly a better way to do this...)
-        simple_wcs = astropy.wcs.WCS(model.meta.wcs.to_fits()[0])
-    except:
-        wcs = model.get_fits_wcs()
-        if cube_ints:
-            wcs = wcs.dropaxis(2)  # drop the nints axis
+    if wcs is None:
+        try:
+            wcs = model.meta.wcs
+            # I don't know how to deal with the slightly different API of the GWCS class
+            # so, this is crude, just cast it to a regular WCS and drop the high order distortion stuff
+            # This suffices for our purposes in plotting compass annotations etc.
+            # (There is almost certainly a better way to do this...)
+            simple_wcs = astropy.wcs.WCS(model.meta.wcs.to_fits()[0])
+        except:
+            wcs = model.get_fits_wcs()
+            #if cube_ints:
+            #    wcs = wcs.dropaxis(2)  # drop the nints axis
+    else:
+        # if we were provided a WCS externally, use that here
+        simple_wcs = astropy.wcs.WCS(wcs.to_fits()[0])
+
 
     if colorbar:
         # Colorbar
@@ -288,20 +293,27 @@ def ta_position_fit_plot(model, box_size = 40, plot=True, saveplot=True, vmax=10
 
 
 def plot_ta_verification_image(model, wcs_offset=(0, 0), host_star_coords=None, tweak_offset=None,
-                               plot=True, vmax=10, box_size=80, saveplot=True, outname_extra=''):
+                               plot=True, vmax=10, box_size=80, saveplot=True, outname_extra='',
+                               model_cal = None):
+    """Plot a TA verification image
+    """
+    # Work around pipeline 1.16 issue by optionally getting WCS from a different file than the image data
+    wcs = model_cal.meta.wcs if model_cal is not None else model.meta.wcs
+
 
     target_coords = astropy.coordinates.SkyCoord(model.meta.target.ra, model.meta.target.dec, frame='icrs', unit=u.deg)
     # target coordinates at epoch, as computed from APT
-    target_coords_pix = list(model.meta.wcs.world_to_pixel(target_coords))
+    target_coords_pix = list(wcs.world_to_pixel(target_coords))
     print(target_coords_pix)
+
 
     # Find the slit center in this particular image (note, this is slightly filter-dependent)
     # Separate into integer part (used for extracting a subarray) and subpixel part (for offsetting the slit model)
 
     if constants.USE_WCS_FOR_SLIT_COORDS:
         print("Inferring LRS slit center based on SIAF and WCS in that image")
-        slit_center = model.meta.wcs.transform('v2v3', 'detector', constants.ap_slit.V2Ref,constants.ap_slit.V3Ref )
-        slit_closed_poly_points = model.meta.wcs.transform('v2v3', 'detector', *constants.ap_slit.closed_polygon_points('tel', rederive=False))
+        slit_center = wcs.transform('v2v3', 'detector', constants.ap_slit.V2Ref,constants.ap_slit.V3Ref )
+        slit_closed_poly_points = wcs.transform('v2v3', 'detector', *constants.ap_slit.closed_polygon_points('tel', rederive=False))
     else:
         print("Using LRS slit center from constants file")
         slit_center = constants.slit_center
@@ -316,7 +328,7 @@ def plot_ta_verification_image(model, wcs_offset=(0, 0), host_star_coords=None, 
     # Get target coordinates at epoch, as computed from APT
     target_coords = astropy.coordinates.SkyCoord(model.meta.target.ra, model.meta.target.dec,
                                                  frame='icrs', unit=u.deg)
-    target_coords_pix = np.asarray(model.meta.wcs.world_to_pixel(target_coords))
+    target_coords_pix = np.asarray(wcs.world_to_pixel(target_coords))
     print(f"Target coords from WCS: {target_coords_pix} pix")
     print(f"Using WCS offset from TA image: {wcs_offset} pix")
     target_coords_pix -= np.asarray(wcs_offset)
@@ -345,7 +357,7 @@ def plot_ta_verification_image(model, wcs_offset=(0, 0), host_star_coords=None, 
 
 
         # Show main full image
-        plot_full_image(model, ax=ax0, colorbar=False, vmax=vmax)
+        plot_full_image(model, ax=ax0, colorbar=False, vmax=vmax, wcs=wcs)
         ax0.add_artist(matplotlib.patches.Rectangle((cutout.xmin_original, cutout.ymin_original), box_size, box_size,
                             edgecolor='yellow', facecolor='none'))
 
@@ -387,7 +399,7 @@ def plot_ta_verification_image(model, wcs_offset=(0, 0), host_star_coords=None, 
 
 
         if host_star_coords is not None:
-            host_star_coords_pix = np.asarray(model.meta.wcs.world_to_pixel(host_star_coords))
+            host_star_coords_pix = np.asarray(wcs.world_to_pixel(host_star_coords))
             #print("HOST STAR:")
             #print("DEBUG - PIX COORDS FROM WCS:", host_star_coords_pix)
             #print("DEBUG - WCS OFFSET: ", wcs_offset)
@@ -530,11 +542,14 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
                                 adjust_slit_center_offset=None,
                                 convolve_slit=True,
                                 plot=True, verbose=True,
-                                box_size=80, vmax=20, saveplot=True, **kwargs):
+                                box_size=80, vmax=20, saveplot=True,
+                                model_cal = None,
+                                **kwargs):
     """ Generate and plot simulation of the PSF scene entering the LRS slit in a TACONFIRM image.
     Intended to help verify the model is setup correctly before the more time-consuming calculations of disperesed PSFs.
 
-    Intended to have 
+    Intended to have the input model be a cal file, but due to a pipeline + flat field NaN issue for 1.16, with that version
+    you must pass in the RATE file as model, and separately pass the CAL file as model_cal.
 
     Parameters
     ----------
@@ -545,11 +560,24 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
     companion_tweak_offset : tuple of floats
         adjust companion position relative to host star. Additive with the above.
     """
+    # Work around pipeline 1.16 issue by optionally getting WCS from a different file than the image data
+
+    if model_cal is not None:
+        # get some metadata from a separate cal file model, for cases where we have to run this on a rate image
+        wcs = model_cal.meta.wcs
+        pixar_sr = model_cal.meta.photometry.pixelarea_steradians * u.sr
+        # assume the main input file is in DN, since it's a rate, and we have to do the flux scale ourselves from DN to MJy/sr
+        flux_conv = model_cal.meta.photometry.conversion_megajanskys * u.MJy/u.sr / (u.DN/u.second)
+
+    else:
+        wcs = model.meta.wcs
+        pixar_sr = model.meta.photometry.pixelarea_steradians * u.sr
+        flux_conv = 1
 
     # Get target coordinates at epoch, as computed from APT
     target_coords = astropy.coordinates.SkyCoord(model.meta.target.ra, model.meta.target.dec,
                                                  frame='icrs', unit=u.deg)
-    target_coords_pix = np.asarray(model.meta.wcs.world_to_pixel(target_coords))
+    target_coords_pix = np.asarray(wcs.world_to_pixel(target_coords))
     print(f"Target coords from WCS: {target_coords_pix}")
     print(f"Using WCS offset from TA image: {wcs_offset}")
     target_coords_pix -= np.asarray(wcs_offset)
@@ -571,8 +599,8 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
     # Find the slit center in this particular image (note, this is slightly filter-dependent)
     # Separate into integer part (used for extracting a subarray) and subpixel part (for offsetting the slit model)
     if constants.USE_WCS_FOR_SLIT_COORDS:
-        slit_center = model.meta.wcs.transform('v2v3', 'detector', constants.ap_slit.V2Ref,constants.ap_slit.V3Ref )
-        slit_closed_poly_points = model.meta.wcs.transform('v2v3', 'detector', *constants.ap_slit.closed_polygon_points('tel', rederive=False))
+        slit_center = wcs.transform('v2v3', 'detector', constants.ap_slit.V2Ref,constants.ap_slit.V3Ref )
+        slit_closed_poly_points = wcs.transform('v2v3', 'detector', *constants.ap_slit.closed_polygon_points('tel', rederive=False))
     else:
         slit_center = constants.slit_center
         #slit_center = tuple(c-1 for c in slit_center_pysiaf)  we SHOULD do this -- but something is off if we do. ???
@@ -613,6 +641,7 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
                                 tweak_offset=np.asarray(tweak_offset) + np.asarray(companion_tweak_offset),
                                 add_distortion=True,
                                 slit_center_offset=slit_center_subpix_offset,
+                                         wcs=wcs,
                                 verbose=verbose, **kwargs)
     if offset_star_coords:
         print("Generating PSF sim for off-axis star:")
@@ -620,6 +649,7 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
                                     tweak_offset=tweak_offset,
                                     add_distortion=True,
                                     slit_center_offset=slit_center_subpix_offset,
+                                            wcs=wcs,
                                     verbose=verbose, **kwargs)
 
     print("Generating PSF sim for slit model convolution:")
@@ -709,7 +739,7 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
         targetmodel = psf_target[ext].data*scalefactor_comp  #+ sampled_slit*background_estimate
     #bkgd_psf_model[mask_outside_slit] += background_estimate #bgmd + np.random.normal(scale=bgsig, size=mask_outside_slit.sum())
     print(f"Flux scale factor for target: {scalefactor_comp}")
-    scaled_targetmodel = targetmodel * u.Unit(model.meta.bunit_data) * (model.meta.photometry.pixelarea_steradians*u.sr)  # convert to MJy
+    scaled_targetmodel = targetmodel * u.Unit(model.meta.bunit_data) * flux_conv * pixar_sr  # convert to MJy
 
 
     residuals = imcopy - bkgd_psf_model - targetmodel
@@ -727,12 +757,13 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
                             add_distortion=True,
                             slit_center_offset=slit_center_subpix_offset,
                                    npix=200,  # ensure nearly all flux in the aperture
+                                    wcs=wcs,
                             verbose=True, **kwargs)
     miri.image_mask = 'LRS slit' # switch back after the off-slit calculation.
     miri.set_position_from_aperture_name('MIRIM_SLIT')
     targetmodel_offslit = psf_offslit[ext].data*scalefactor_comp  #+ sampled_slit*background_estimate
 
-    scaled_targetmodel_offslit = targetmodel_offslit * u.Unit(model.meta.bunit_data) * (model.meta.photometry.pixelarea_steradians*u.sr)
+    scaled_targetmodel_offslit = targetmodel_offslit * u.Unit(model.meta.bunit_data) * flux_conv * pixar_sr
     print(f"Scaled PSF model (through slit) flux in {model.meta.instrument.filter}: {scaled_targetmodel.sum().to(u.mJy)}")
     print(f"Scaled PSF model (no slit losses) flux in {model.meta.instrument.filter}: {scaled_targetmodel_offslit.sum().to(u.mJy)}")
     print('')
@@ -742,7 +773,7 @@ def plot_taconfirm_psf_fit_flux(model, miri, offset_star_coords=None, wcs_offset
         # Determine off-axis star coordinates in pixels (for use in plotting)
         # Note, the actual values used in the calculation happen in sim_offset_source
         # this duplicates that calculation for plotting & labeling
-        pix_coords = np.asarray(model.meta.wcs.world_to_pixel(offset_star_coords))
+        pix_coords = np.asarray(wcs.world_to_pixel(offset_star_coords))
         pix_coords -= np.asarray(wcs_offset)
         if tweak_offset is not None:
             pix_coords -= np.asarray(tweak_offset)
